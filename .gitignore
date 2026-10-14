@@ -1,0 +1,11 @@
+# pixi environments
+.pixi/*
+!.pixi/config.toml
+
+# vscode
+**/.vscode
+**/.DS_Store
+
+# python
+**/__pycache__
+**/.ruff_cache
