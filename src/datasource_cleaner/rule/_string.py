@@ -89,7 +89,7 @@ class StringRule(ColumnRule):
         trim = self.trim_left
         if trim is False:
             return exp
-        elif trim == True:
+        elif trim is True:
             return exp.str.strip_chars_start()
         return exp.str.strip_chars_start(trim)
 
@@ -97,7 +97,7 @@ class StringRule(ColumnRule):
         trim = self.trim_right
         if trim is False:
             return exp
-        elif trim == True:
+        elif trim is True:
             return exp.str.strip_chars_end()
         return exp.str.strip_chars_end(trim)
 
