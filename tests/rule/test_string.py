@@ -1,3 +1,4 @@
+import dataclasses
 import sys
 from collections.abc import Callable, Sequence
 
@@ -400,3 +401,139 @@ def test_pad_left_and_pad_right_are_exclusive(pad_left: int, pad_right: int):
 def test_pad_char_must_be_single_char(pad_char: str):
     with pytest.raises(ValueError, match="pad_char must be a single character"):
         StringRule(pad_char=pad_char)
+
+
+# --------------------------------------- apply ----------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("values", "expected"),
+    [
+        (["  a  b  ", "\t\na\n"], ["a  b", "a"]),
+        (["   ", ""], ["", ""]),
+        ([None], [None]),
+    ],
+)
+def test_apply_default_only_trims(values: list[str | None], expected: list[str | None]):
+    assert _apply_string(values, StringRule().apply) == expected
+
+
+# each case only gives the expected result if the first step runs before the second
+@pytest.mark.parametrize(
+    ("rule", "value", "expected"),
+    [
+        pytest.param(StringRule(null_values=["NA"]), "  NA  ", None, id="trim>null"),
+        pytest.param(
+            StringRule(null_values=["a b"], collapse_whitespace=True),
+            "a  b",
+            "a b",
+            id="null>collapse",
+        ),
+        pytest.param(
+            StringRule(collapse_whitespace=True, replace=[("a b", "x")]),
+            "a  b",
+            "x",
+            id="collapse>replace",
+        ),
+        pytest.param(
+            StringRule(replace=[("a", "b")], regex_replace=[("b", "c")]),
+            "a",
+            "c",
+            id="replace>regex_replace",
+        ),
+        pytest.param(
+            StringRule(regex_replace=[("A", "x")], case="upper"),
+            "aA",
+            "AX",
+            id="regex_replace>case",
+        ),
+        pytest.param(
+            StringRule(case="upper", max_length=1), "ß", "S", id="case>max_length"
+        ),
+        pytest.param(
+            StringRule(max_length=2, pad_left=4, pad_char="0"),
+            "abc",
+            "00ab",
+            id="max_length>pad",
+        ),
+        pytest.param(
+            StringRule(pad_right=2, empty_as_null=True), "", "  ", id="pad>empty"
+        ),
+        pytest.param(StringRule(empty_as_null=True), "   ", None, id="trim>empty"),
+        pytest.param(
+            StringRule(regex_replace=[("x", "")], empty_as_null=True),
+            "xx",
+            None,
+            id="regex_replace>empty",
+        ),
+    ],
+)
+def test_apply_order(rule: StringRule, value: str, expected: str | None):
+    assert _apply_string([value], rule.apply) == [expected]
+
+
+def test_apply_all_options():
+    rule = StringRule(
+        trim_left=" _",
+        trim_right=" _",
+        null_values=["n/a"],
+        null_values_ignore_case=True,
+        collapse_whitespace=True,
+        replace=[("&", "and")],
+        regex_replace=[(r"(\w+), (\w+)", "$2 $1")],
+        case="title",
+        max_length=12,
+        pad_right=12,
+        pad_char=".",
+        empty_as_null=True,
+    )
+    values = ["__doe,   john__", " N/A ", "smith & co", "___", None]
+    expected = ["John Doe....", None, "Smith And Co", "............", None]
+    assert _apply_string(values, rule.apply) == expected
+
+
+def _chain_in_documented_order(rule: StringRule, exp: pl.Expr) -> pl.Expr:
+    for step in (
+        rule._trim,  # type: ignore
+        rule._replace_null_values,  # type: ignore
+        rule._collapse_whitespaces_to_regular_whitespace,  # type: ignore
+        rule._replace,  # type: ignore
+        rule._regex_replace,  # type: ignore
+        rule._case,  # type: ignore
+        rule._max_length,  # type: ignore
+        rule._pad_left,  # type: ignore
+        rule._pad_right,  # type: ignore
+        rule._empty_as_null,  # type: ignore
+    ):
+        exp = step(exp)
+    return exp
+
+
+rules = st.builds(
+    StringRule,
+    trim_left=st.one_of(st.booleans(), trim_chars),
+    trim_right=st.one_of(st.booleans(), trim_chars),
+    null_values=st.lists(st.text(), unique=True),
+    null_values_ignore_case=st.booleans(),
+    collapse_whitespace=st.booleans(),
+    replace=st.lists(st.tuples(st.text(min_size=1), st.text())),
+    regex_replace=st.lists(st.tuples(literal_patterns, replacements)),
+    case=st.sampled_from([None, "lower", "upper", "title"]),
+    max_length=st.one_of(st.none(), widths),
+    pad_char=pad_chars,
+    empty_as_null=st.booleans(),
+).flatmap(
+    lambda rule: st.one_of(
+        st.just(rule),
+        widths.map(lambda w: dataclasses.replace(rule, pad_left=w)),
+        widths.map(lambda w: dataclasses.replace(rule, pad_right=w)),
+    )
+)
+
+
+@given(rule=rules, values=st.lists(st.one_of(st.none(), st.text())))
+def test_apply_chains_steps_in_documented_order(
+    rule: StringRule, values: list[str | None]
+):
+    expected = _apply_string(values, lambda exp: _chain_in_documented_order(rule, exp))
+    assert _apply_string(values, rule.apply) == expected
