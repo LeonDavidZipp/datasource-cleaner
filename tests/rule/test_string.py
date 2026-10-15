@@ -184,3 +184,64 @@ def test_replace_multi_char_patterns(
 ):
     rule = StringRule(replace=replace)
     assert _apply_string(values, rule._replace) == expected  # type: ignore
+
+
+# ----------------------------------- _regex_replace -----------------------------------
+
+
+literal_patterns = st.text(alphabet=st.characters(categories=("L", "N")), min_size=1)
+replacements = st.text(alphabet=st.characters(codec="utf-8", exclude_characters="$"))
+
+
+@st.composite
+def regex_replacements_and_values(
+    draw: st.DrawFn,
+) -> tuple[list[tuple[str, str]], list[str | None]]:
+    pairs = draw(st.lists(st.tuples(literal_patterns, replacements), min_size=1))
+    fragment = st.one_of(st.text(), st.sampled_from([p for p, _ in pairs]))
+    value = st.lists(fragment).map("".join)
+    values = draw(st.lists(st.one_of(st.none(), value)))
+    return pairs, values
+
+
+@given(case=regex_replacements_and_values())
+def test_regex_replace_applies_in_order(
+    case: tuple[list[tuple[str, str]], list[str | None]],
+):
+    pairs, values = case
+    rule = StringRule(regex_replace=pairs)
+    expected: list[str | None] = []
+    for v in values:
+        if v is not None:
+            for pattern, replacement in pairs:
+                v = v.replace(pattern, replacement)
+        expected.append(v)
+    assert _apply_string(values, rule._regex_replace) == expected  # type: ignore
+
+
+@given(values=st.lists(st.one_of(st.none(), st.text())))
+def test_regex_replace_empty_leaves_untouched(values: list[str | None]):
+    rule = StringRule(regex_replace=())
+    assert _apply_string(values, rule._regex_replace) == values  # type: ignore
+
+
+@pytest.mark.parametrize(
+    ("regex_replace", "values", "expected"),
+    [
+        ([(r"\d+", "#")], ["a1b22c333"], ["a#b#c#"]),
+        ([(r"^\s+|\s+$", "")], ["  a b  "], ["a b"]),
+        ([(r"(\w+)@(\w+)", "$2 at $1")], ["me@host"], ["host at me"]),
+        ([(r"(?<user>\w+)@", "${user}:")], ["me@host"], ["me:host"]),
+        ([(r"(?i)abc", "x")], ["ABC aBc abc"], ["x x x"]),
+        ([(r"a", "b"), (r"b", "c")], ["ab"], ["cc"]),
+        ([(r"b", "c"), (r"a", "b")], ["ab"], ["bc"]),
+        ([(r"x", "y")], [None, ""], [None, ""]),
+    ],
+)
+def test_regex_replace_examples(
+    regex_replace: list[tuple[str, str]],
+    values: list[str | None],
+    expected: list[str | None],
+):
+    rule = StringRule(regex_replace=regex_replace)
+    assert _apply_string(values, rule._regex_replace) == expected  # type: ignore
