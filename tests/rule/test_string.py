@@ -2,6 +2,7 @@ import sys
 from collections.abc import Callable, Sequence
 
 import polars as pl
+import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
@@ -130,3 +131,56 @@ def test_collapse_whitespaces_false_leaves_untouched(case: tuple[list[str], list
     rule = StringRule(collapse_whitespace=False)
     result = _apply_string(values, rule._collapse_whitespaces_to_regular_whitespace)  # type: ignore
     assert result == values
+
+
+# -------------------------------------- _replace --------------------------------------
+
+
+@st.composite
+def replacements_and_values(
+    draw: st.DrawFn,
+) -> tuple[dict[str, str], list[str | None]]:
+    replacements = draw(
+        st.dictionaries(st.characters(codec="utf-8"), st.text(), min_size=1)
+    )
+    olds = st.sampled_from(sorted(replacements))
+    value = st.lists(st.one_of(st.characters(codec="utf-8"), olds)).map("".join)
+    values = draw(st.lists(st.one_of(st.none(), value)))
+    return replacements, values
+
+
+@given(case=replacements_and_values())
+def test_replace(case: tuple[dict[str, str], list[str | None]]):
+    replacements, values = case
+    rule = StringRule(replace=list(replacements.items()))
+    expected = [
+        None if v is None else "".join(replacements.get(c, c) for c in v)
+        for v in values
+    ]
+    assert _apply_string(values, rule._replace) == expected  # type: ignore
+
+
+@given(values=st.lists(st.one_of(st.none(), st.text())))
+def test_replace_empty_leaves_untouched(values: list[str | None]):
+    rule = StringRule(replace=())
+    assert _apply_string(values, rule._replace) == values  # type: ignore
+
+
+# polars' default (non-leftmost) matching: the match that ends first wins,
+# regardless of the order the pairs are given in
+@pytest.mark.parametrize(
+    ("replace", "values", "expected"),
+    [
+        ([("ab", "1"), ("b", "2")], ["ab", "xabcx", "bab"], ["1", "x1cx", "21"]),
+        ([("b", "2"), ("ab", "1")], ["ab", "xabcx", "bab"], ["1", "x1cx", "21"]),
+        ([("abc", "1"), ("b", "2")], ["abc", "xabcx"], ["a2c", "xa2cx"]),
+        ([("aa", "1"), ("a", "2")], ["aaa", "aab"], ["222", "22b"]),
+        ([("bc", "1"), ("ab", "2")], ["abc", "bcab"], ["2c", "12"]),
+        ([("ab", "ba")], ["abab", "aabb"], ["baba", "abab"]),
+    ],
+)
+def test_replace_multi_char_patterns(
+    replace: list[tuple[str, str]], values: list[str], expected: list[str]
+):
+    rule = StringRule(replace=replace)
+    assert _apply_string(values, rule._replace) == expected  # type: ignore
