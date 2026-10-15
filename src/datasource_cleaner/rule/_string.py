@@ -108,6 +108,7 @@ class StringRule(ColumnRule):
                 pl.when(exp.str.to_lowercase().is_in(lower_null_values))
                 .then(pl.lit(None))
                 .otherwise(exp)
+                .name.keep()
             )
         return exp.replace(self.null_values, pl.lit(None))
 
@@ -157,5 +158,10 @@ class StringRule(ColumnRule):
 
     def _empty_as_null(self, exp: pl.Expr) -> pl.Expr:
         if self.empty_as_null:
-            return pl.when(exp.str.len_chars() == 0).then(pl.lit(None)).otherwise(exp)
+            return (
+                pl.when(exp.str.len_chars() == 0)
+                .then(pl.lit(None))
+                .otherwise(exp)
+                .name.keep()
+            )
         return exp
