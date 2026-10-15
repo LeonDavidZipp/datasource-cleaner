@@ -307,3 +307,96 @@ def test_case_title_examples(values: list[str], expected: list[str]):
 def test_case_none_leaves_untouched(values: list[str | None]):
     rule = StringRule(case=None)
     assert _apply_string(values, rule._case) == values  # type: ignore
+
+
+# ------------------------------------ _max_length -------------------------------------
+
+
+@given(
+    max_length=st.integers(min_value=0, max_value=20),
+    values=st.lists(st.one_of(st.none(), st.text())),
+)
+def test_max_length(max_length: int, values: list[str | None]):
+    rule = StringRule(max_length=max_length)
+    expected = [None if v is None else v[:max_length] for v in values]
+    assert _apply_string(values, rule._max_length) == expected  # type: ignore
+
+
+@given(values=st.lists(st.one_of(st.none(), st.text())))
+def test_max_length_none_leaves_untouched(values: list[str | None]):
+    rule = StringRule(max_length=None)
+    assert _apply_string(values, rule._max_length) == values  # type: ignore
+
+
+# ---------------------------------------- _pad ----------------------------------------
+
+
+widths = st.integers(min_value=0, max_value=20)
+pad_chars = st.characters(codec="utf-8")
+
+
+@given(
+    width=widths,
+    pad_char=pad_chars,
+    values=st.lists(st.one_of(st.none(), st.text())),
+)
+def test_pad_left(width: int, pad_char: str, values: list[str | None]):
+    rule = StringRule(pad_left=width, pad_char=pad_char)
+    expected = [None if v is None else v.rjust(width, pad_char) for v in values]
+    assert _apply_string(values, rule._pad_left) == expected  # type: ignore
+
+
+@given(
+    width=widths,
+    pad_char=pad_chars,
+    values=st.lists(st.one_of(st.none(), st.text())),
+)
+def test_pad_right(width: int, pad_char: str, values: list[str | None]):
+    rule = StringRule(pad_right=width, pad_char=pad_char)
+    expected = [None if v is None else v.ljust(width, pad_char) for v in values]
+    assert _apply_string(values, rule._pad_right) == expected  # type: ignore
+
+
+@given(values=st.lists(st.one_of(st.none(), st.text())))
+def test_pad_none_leaves_untouched(values: list[str | None]):
+    rule = StringRule(pad_left=None, pad_right=None)
+    assert _apply_string(values, rule._pad_left) == values  # type: ignore
+    assert _apply_string(values, rule._pad_right) == values  # type: ignore
+
+
+# ----------------------------------- _empty_as_null -----------------------------------
+
+
+@given(values=st.lists(st.one_of(st.none(), st.just(""), st.text())))
+def test_empty_as_null(values: list[str | None]):
+    rule = StringRule(empty_as_null=True)
+    expected = [v or None for v in values]
+    assert _apply_string(values, rule._empty_as_null) == expected  # type: ignore
+
+
+@given(values=st.lists(st.one_of(st.none(), st.just(""), st.text())))
+def test_empty_as_null_false_leaves_untouched(values: list[str | None]):
+    rule = StringRule(empty_as_null=False)
+    assert _apply_string(values, rule._empty_as_null) == values  # type: ignore
+
+
+# ----------------------------------- __post_init__ ------------------------------------
+
+
+@pytest.mark.parametrize("name", ["max_length", "pad_left", "pad_right"])
+@given(value=st.integers(max_value=-1))
+def test_negative_lengths_raise(name: str, value: int):
+    with pytest.raises(ValueError, match=f"{name} must be non-negative"):
+        StringRule(**{name: value})  # type: ignore
+
+
+@given(pad_left=widths, pad_right=widths)
+def test_pad_left_and_pad_right_are_exclusive(pad_left: int, pad_right: int):
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        StringRule(pad_left=pad_left, pad_right=pad_right)
+
+
+@given(pad_char=st.text().filter(lambda s: len(s) != 1))
+def test_pad_char_must_be_single_char(pad_char: str):
+    with pytest.raises(ValueError, match="pad_char must be a single character"):
+        StringRule(pad_char=pad_char)
