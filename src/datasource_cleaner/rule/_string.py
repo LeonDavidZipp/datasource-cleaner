@@ -59,7 +59,7 @@ class StringRule(ColumnRule):
     def apply(self, exp: pl.Expr) -> pl.Expr:
         exp = self._trim(exp)
         exp = self._replace_null_values(exp)
-        exp = self._collapse_whitespaces(exp)
+        exp = self._collapse_whitespaces_to_regular_whitespace(exp)
         exp = self._replace(exp)
         exp = self._regex_replace(exp)
         exp = self._case(exp)
@@ -112,7 +112,7 @@ class StringRule(ColumnRule):
             )
         return exp.replace(self.null_values, pl.lit(None))
 
-    def _collapse_whitespaces(self, exp: pl.Expr) -> pl.Expr:
+    def _collapse_whitespaces_to_regular_whitespace(self, exp: pl.Expr) -> pl.Expr:
         if self.collapse_whitespace:
             return exp.str.replace_all(r"\s+", " ")
         return exp

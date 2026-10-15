@@ -1,4 +1,5 @@
-from collections.abc import Callable
+import sys
+from collections.abc import Callable, Sequence
 
 import polars as pl
 from hypothesis import given
@@ -6,7 +7,9 @@ from hypothesis import strategies as st
 
 from datasource_cleaner.rule import StringRule
 
-trim_chars = st.lists(st.characters(), unique=True, min_size=1).map("".join)
+trim_chars = st.lists(st.characters(codec="utf-8"), unique=True, min_size=1).map(
+    "".join
+)
 
 
 @st.composite
@@ -33,7 +36,7 @@ def null_values_and_values(
 
 
 def _apply_string(
-    values: list[str | None], method: Callable[[pl.Expr], pl.Expr]
+    values: Sequence[str | None], method: Callable[[pl.Expr], pl.Expr]
 ) -> list[str | None]:
     lf = pl.DataFrame({"col": values}, schema={"col": pl.String})
     return lf.select(method(pl.col("col"))).get_column("col").to_list()
@@ -70,3 +73,48 @@ def test_replace_null_values_ignore_case(case: tuple[list[str], list[str | None]
         None if v is not None and v.lower() in lower_null_values else v for v in values
     ]
     assert _apply_string(values, rule._replace_null_values) == expected  # type: ignore
+
+
+_WHITESPACE_CHARS = [
+    c
+    for i in range(sys.maxunicode + 1)
+    if (c := chr(i)).isspace() and c not in "\x1c\x1d\x1e\x1f"
+]
+
+
+words = st.text(
+    alphabet=st.characters(codec="utf-8").filter(lambda c: not c.isspace()), min_size=1
+)
+whitespace = st.text(alphabet=st.sampled_from(_WHITESPACE_CHARS), min_size=1)
+
+
+@st.composite
+def whitespace_string(draw: st.DrawFn) -> tuple[str, str]:
+    parts = draw(st.lists(words, min_size=2, max_size=11))
+    text = parts[0]
+    for part in parts[1:]:
+        text += draw(whitespace) + part
+    return text, " ".join(parts)
+
+
+@st.composite
+def whitespace_strings(draw: st.DrawFn) -> tuple[list[str], list[str]]:
+    cases = draw(st.lists(whitespace_string(), min_size=1))
+    texts, expected = zip(*cases)
+    return list(texts), list(expected)
+
+
+@given(case=whitespace_strings())
+def test_collapse_whitespaces(case: tuple[list[str], list[str]]):
+    values, expected = case
+    rule = StringRule(collapse_whitespace=True)
+    result = _apply_string(values, rule._collapse_whitespaces_to_regular_whitespace)  # type: ignore
+    assert result == expected
+
+
+@given(case=whitespace_strings())
+def test_collapse_whitespaces_false_leaves_untouched(case: tuple[list[str], list[str]]):
+    values, _ = case
+    rule = StringRule(collapse_whitespace=False)
+    result = _apply_string(values, rule._collapse_whitespaces_to_regular_whitespace)  # type: ignore
+    assert result == values
