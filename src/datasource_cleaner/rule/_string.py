@@ -39,7 +39,8 @@ class StringRule(ColumnRule):
     ] = ()
     regex_replace: Annotated[
         Sequence[tuple[str, str]],
-        "Regex (pattern, replacement) substitutions, applied in order.",
+        "Regex (pattern, replacement) substitutions, applied in order. "
+        "Replacements reference capture groups as $1 or ${name}, not \\1.",
     ] = ()
     case: Annotated[Case | None, "Convert to this case, or leave as is if None."] = None
     max_length: Annotated[int | None, "Truncate to at most this many characters."] = (
