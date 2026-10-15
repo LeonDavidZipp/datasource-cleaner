@@ -143,18 +143,18 @@ class StringRule(ColumnRule):
                 return exp.str.to_titlecase()
 
     def _max_length(self, exp: pl.Expr) -> pl.Expr:
-        if self.max_length:
+        if self.max_length is not None:
             return exp.str.slice(0, self.max_length)
         return exp
 
     def _pad_left(self, exp: pl.Expr) -> pl.Expr:
-        if self.pad_left:
-            return exp.str.pad_start(self.pad_char)
+        if self.pad_left is not None:
+            return exp.str.pad_start(self.pad_left, self.pad_char)
         return exp
 
     def _pad_right(self, exp: pl.Expr) -> pl.Expr:
-        if self.pad_left:
-            return exp.str.pad_end(self.pad_char)
+        if self.pad_right is not None:
+            return exp.str.pad_end(self.pad_right, self.pad_char)
         return exp
 
     def _empty_as_null(self, exp: pl.Expr) -> pl.Expr:
