@@ -3,10 +3,12 @@ from collections.abc import Callable, Sequence
 
 import polars as pl
 import pytest
+import regex
 from hypothesis import given
 from hypothesis import strategies as st
 
 from datasource_cleaner.rule import StringRule
+from datasource_cleaner.rule._string import Case
 
 # -------------------------------------- helpers ---------------------------------------
 
@@ -245,3 +247,63 @@ def test_regex_replace_examples(
 ):
     rule = StringRule(regex_replace=regex_replace)
     assert _apply_string(values, rule._regex_replace) == expected  # type: ignore
+
+
+# --------------------------------------- _case ----------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("case", "reference"), [("lower", str.lower), ("upper", str.upper)]
+)
+@given(values=st.lists(st.one_of(st.none(), st.text())))
+def test_case(case: Case, reference: Callable[[str], str], values: list[str | None]):
+    rule = StringRule(case=case)
+    expected = [None if v is None else reference(v) for v in values]
+    assert _apply_string(values, rule._case) == expected  # type: ignore
+
+
+_ALPHABETIC = regex.compile(r"\p{Alphabetic}")
+
+
+def _title_reference(value: str) -> str:
+    out: list[str] = []
+    in_word = False
+    for c in value:
+        out.append(c.lower() if in_word else c.title())
+        in_word = _ALPHABETIC.match(c) is not None
+    return "".join(out)
+
+
+# regex may know newer Unicode chars than polars does, so leave out unassigned ones
+title_text = st.text(alphabet=st.characters(codec="utf-8", exclude_categories=("Cn",)))
+
+
+@given(values=st.lists(st.one_of(st.none(), title_text)))
+def test_case_title(values: list[str | None]):
+    rule = StringRule(case="title")
+    expected = [None if v is None else _title_reference(v) for v in values]
+    assert _apply_string(values, rule._case) == expected  # type: ignore
+
+
+@pytest.mark.parametrize(
+    ("values", "expected"),
+    [
+        (["hELLO wORLD"], ["Hello World"]),
+        (["o'neil", "foo-bar", "foo_bar"], ["O'Neil", "Foo-Bar", "Foo_Bar"]),
+        (["a1b c2d"], ["A1B C2D"]),
+        (["ǆungla"], ["ǅungla"]),
+        (["straße"], ["Straße"]),
+        (["ΣΑΣ"], ["Σας"]),
+        (["ٮA"], ["ٮa"]),
+        (["xͅA"], ["Xͅa"]),
+    ],
+)
+def test_case_title_examples(values: list[str], expected: list[str]):
+    rule = StringRule(case="title")
+    assert _apply_string(values, rule._case) == expected  # type: ignore
+
+
+@given(values=st.lists(st.one_of(st.none(), st.text())))
+def test_case_none_leaves_untouched(values: list[str | None]):
+    rule = StringRule(case=None)
+    assert _apply_string(values, rule._case) == values  # type: ignore

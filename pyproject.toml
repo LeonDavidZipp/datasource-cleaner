@@ -29,6 +29,7 @@ sqlalchemy = ">=2.1.4,<3"
 pytest = "*"
 hypothesis = "*"
 sqlite = "*"
+regex = "*"
 
 [tool.pixi.environments]
 default = ["dev"]
