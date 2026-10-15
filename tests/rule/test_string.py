@@ -7,6 +7,16 @@ from hypothesis import strategies as st
 
 from datasource_cleaner.rule import StringRule
 
+# -------------------------------------- helpers ---------------------------------------
+
+
+def _apply_string(
+    values: Sequence[str | None], method: Callable[[pl.Expr], pl.Expr]
+) -> list[str | None]:
+    lf = pl.DataFrame({"col": values}, schema={"col": pl.String})
+    return lf.select(method(pl.col("col"))).get_column("col").to_list()
+
+
 trim_chars = st.lists(st.characters(codec="utf-8"), unique=True, min_size=1).map(
     "".join
 )
@@ -35,11 +45,7 @@ def null_values_and_values(
     return null_values, values
 
 
-def _apply_string(
-    values: Sequence[str | None], method: Callable[[pl.Expr], pl.Expr]
-) -> list[str | None]:
-    lf = pl.DataFrame({"col": values}, schema={"col": pl.String})
-    return lf.select(method(pl.col("col"))).get_column("col").to_list()
+# --------------------------------------- _trim ----------------------------------------
 
 
 @given(case=chars_and_values())
@@ -54,6 +60,9 @@ def test_trim_right_chars(case: tuple[str, list[str]]):
     chars, values = case
     rule = StringRule(trim_left=False, trim_right=chars)
     assert _apply_string(values, rule._trim_right) == [v.rstrip(chars) for v in values]  # type: ignore
+
+
+# -------------------------------- _replace_null_values --------------------------------
 
 
 @given(case=null_values_and_values())
@@ -73,6 +82,9 @@ def test_replace_null_values_ignore_case(case: tuple[list[str], list[str | None]
         None if v is not None and v.lower() in lower_null_values else v for v in values
     ]
     assert _apply_string(values, rule._replace_null_values) == expected  # type: ignore
+
+
+# -------------------- _collapse_whitespaces_to_regular_whitespace ---------------------
 
 
 _WHITESPACE_CHARS = [
