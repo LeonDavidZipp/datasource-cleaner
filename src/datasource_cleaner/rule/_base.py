@@ -21,5 +21,6 @@ class ColumnRule(ABC):
     @abstractmethod
     def to_sql(self, dialect: Dialect) -> str:
         """
-        Converts the instance to sql of the given dialect
+        Converts the instance to sql of the given dialect, as a str.format
+        template with the column as {col}
         """
