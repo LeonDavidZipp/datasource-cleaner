@@ -24,3 +24,12 @@ lint = "pixi exec ruff format --check && pixi exec ruff check"
 polars = ">=2.0.0,<3"
 numpy = ">=2.5.4,<3"
 sqlalchemy = ">=2.1.4,<3"
+
+[tool.pixi.feature.dev.dependencies]
+pytest = "*"
+hypothesis = "*"
+sqlite = "*"
+regex = "*"
+
+[tool.pixi.environments]
+default = ["dev"]
