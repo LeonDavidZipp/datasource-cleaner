@@ -1,3 +1,4 @@
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Annotated, Literal
@@ -69,7 +70,30 @@ class StringRule(ColumnRule):
         exp = self._pad_right(exp)
         return self._empty_as_null(exp)
 
-    def to_sql(self, dialect: Dialect) -> str: ...
+    def to_sql(self, dialect: Dialect) -> str:
+        """
+        Returns a str.format template of the SQL expression applying the rule,
+        with the column as {col}.
+
+        Differences to apply:
+        - replace pairs are applied one after another, not simultaneously
+        - regex patterns are passed on as is, so they follow the regex flavour of
+          the dialect
+        - case conversion follows the database, e.g. sqlite only converts ASCII and
+          postgres' INITCAP continues words over digits
+
+        Raises NotImplementedError for options the dialect can't express.
+        """
+        sql = "{col}"
+        sql = self._trim_sql(sql, dialect)
+        sql = self._replace_null_values_sql(sql, dialect)
+        sql = self._collapse_whitespace_sql(sql, dialect)
+        sql = self._replace_sql(sql, dialect)
+        sql = self._regex_replace_sql(sql, dialect)
+        sql = self._case_sql(sql, dialect)
+        sql = self._max_length_sql(sql)
+        sql = self._pad_sql(sql, dialect)
+        return self._empty_as_null_sql(sql, dialect)
 
     def __post_init__(self):
         for name in ("max_length", "pad_left", "pad_right"):
@@ -166,3 +190,194 @@ class StringRule(ColumnRule):
                 .name.keep()
             )
         return exp
+
+    def _trim_sql(self, sql: str, dialect: Dialect) -> str:
+        for trim, func, anchored in (
+            (self.trim_right, "RTRIM", "{}+\\z"),
+            (self.trim_left, "LTRIM", "\\A{}+"),
+        ):
+            chars = _WHITESPACE if trim is True else trim
+            if not chars:
+                continue
+            if dialect == "mysql":
+                # mysql's TRIM removes a substring, not a set of characters
+                pattern = anchored.format(_regex_char_class(chars, dialect))
+                sql = f"REGEXP_REPLACE({sql}, {_sql_literal(pattern, dialect)}, '')"
+            else:
+                sql = f"{func}({sql}, {_sql_literal(chars, dialect)})"
+        return sql
+
+    def _replace_null_values_sql(self, sql: str, dialect: Dialect) -> str:
+        if not self.null_values:
+            return sql
+        probe = sql
+        null_values = self.null_values
+        if self.null_values_ignore_case:
+            probe = f"LOWER({probe})"
+            null_values = [val.lower() for val in null_values]
+        if dialect == "mysql":
+            # mysql's default collations ignore case and accents
+            probe = f"CAST({probe} AS BINARY)"
+        literals = ", ".join(
+            _sql_literal(val, dialect) for val in dict.fromkeys(null_values)
+        )
+        return f"CASE WHEN {probe} IN ({literals}) THEN NULL ELSE {sql} END"
+
+    def _collapse_whitespace_sql(self, sql: str, dialect: Dialect) -> str:
+        if not self.collapse_whitespace:
+            return sql
+        pattern = _regex_char_class(_WHITESPACE, dialect) + "+"
+        return self._regexp_replace_sql(sql, pattern, " ", dialect)
+
+    def _replace_sql(self, sql: str, dialect: Dialect) -> str:
+        for old, new in self.replace:
+            old, new = _sql_literal(old, dialect), _sql_literal(new, dialect)
+            sql = f"REPLACE({sql}, {old}, {new})"
+        return sql
+
+    def _regex_replace_sql(self, sql: str, dialect: Dialect) -> str:
+        for pattern, replacement in self.regex_replace:
+            replacement = _regex_replacement(replacement, dialect)
+            sql = self._regexp_replace_sql(sql, pattern, replacement, dialect)
+        return sql
+
+    def _regexp_replace_sql(
+        self, sql: str, pattern: str, replacement: str, dialect: Dialect
+    ) -> str:
+        if dialect == "sqlite":
+            raise NotImplementedError("sqlite has no regex replacement")
+        args = [sql, _sql_literal(pattern, dialect), _sql_literal(replacement, dialect)]
+        if dialect == "postgres":
+            # postgres only replaces the first match without the g flag
+            args.append("'g'")
+        return f"REGEXP_REPLACE({', '.join(args)})"
+
+    def _case_sql(self, sql: str, dialect: Dialect) -> str:
+        match self.case:
+            case None:
+                return sql
+            case "lower":
+                return f"LOWER({sql})"
+            case "upper":
+                return f"UPPER({sql})"
+            case "title":
+                if dialect not in ("postgres", "bigquery"):
+                    raise NotImplementedError(f"{dialect} has no title case")
+                return f"INITCAP({sql})"
+
+    def _max_length_sql(self, sql: str) -> str:
+        if self.max_length is not None:
+            return f"SUBSTR({sql}, 1, {self.max_length})"
+        return sql
+
+    def _pad_sql(self, sql: str, dialect: Dialect) -> str:
+        for width, func in ((self.pad_left, "LPAD"), (self.pad_right, "RPAD")):
+            if width is None:
+                continue
+            pad_char = _sql_literal(self.pad_char, dialect)
+            length = "CHAR_LENGTH" if dialect == "mysql" else "LENGTH"
+            if dialect == "sqlite":
+                # sqlite has no LPAD/RPAD, so build the padding from width zeros
+                padding = (
+                    f"SUBSTR(REPLACE(HEX(ZEROBLOB({width})), '00', {pad_char}), "
+                    f"1, MAX({width} - LENGTH({sql}), 0))"
+                )
+                return (
+                    f"{padding} || {sql}" if func == "LPAD" else f"{sql} || {padding}"
+                )
+            # LPAD and RPAD also truncate to width, which polars doesn't
+            return f"{func}({sql}, GREATEST({width}, {length}({sql})), {pad_char})"
+        return sql
+
+    def _empty_as_null_sql(self, sql: str, dialect: Dialect) -> str:
+        if not self.empty_as_null:
+            return sql
+        if dialect == "mysql":
+            # mysql's PAD SPACE collations consider "  " equal to ""
+            return f"CASE WHEN CHAR_LENGTH({sql}) = 0 THEN NULL ELSE {sql} END"
+        return f"NULLIF({sql}, '')"
+
+
+# Unicode White_Space, which polars strips by default and matches with \s
+_WHITESPACE = "".join(
+    map(
+        chr,
+        [
+            *range(0x09, 0x0E),
+            0x20,
+            0x85,
+            0xA0,
+            0x1680,
+            *range(0x2000, 0x200B),
+            0x2028,
+            0x2029,
+            0x202F,
+            0x205F,
+            0x3000,
+        ],
+    )
+)
+
+# group references in polars (Rust regex) replacements: $$, ${name} and $name
+_GROUP_REF = re.compile(r"\$(?:\$|\{([0-9A-Za-z_]+)\}|([0-9A-Za-z_]+))")
+
+
+def _sql_literal(value: str, dialect: Dialect) -> str:
+    if dialect == "bigquery":
+        value = value.replace("\\", "\\\\").replace("'", "\\'")
+        # bigquery doesn't allow raw newlines and the like in quoted strings
+        value = "".join(c if c.isprintable() else f"\\U{ord(c):08x}" for c in value)
+    else:
+        if dialect == "mysql":
+            value = value.replace("\\", "\\\\")
+        value = value.replace("'", "''")
+    # to_sql returns a str.format template, so literal braces are doubled
+    return "'" + value.replace("{", "{{").replace("}", "}}") + "'"
+
+
+def _regex_char_class(chars: str, dialect: Dialect) -> str:
+    if dialect == "postgres":
+        return "[" + "".join(f"\\U{ord(c):08x}" for c in chars) + "]"
+    return "[" + "".join(f"\\x{{{ord(c):x}}}" for c in chars) + "]"
+
+
+def _regex_replacement(replacement: str, dialect: Dialect) -> str:
+    """
+    Translates a polars regex replacement into the syntax of the dialect.
+    """
+
+    def literal(text: str) -> str:
+        if dialect == "mysql":
+            return re.sub(r"([\\$])", r"\\\1", text)
+        return text.replace("\\", "\\\\")
+
+    out: list[str] = []
+    pos = 0
+    after_ref = False
+    for match in _GROUP_REF.finditer(replacement):
+        text = literal(replacement[pos : match.start()])
+        # stop a following digit from being read as part of the group number
+        if after_ref and dialect == "mysql" and text[:1].isdigit():
+            text = "\\" + text
+        out.append(text)
+        pos = match.end()
+        name = match.group(1) or match.group(2)
+        if name is None:
+            out.append(literal("$"))
+            after_ref = False
+        elif dialect == "mysql":
+            out.append(f"${name}" if name.isdigit() else f"${{{name}}}")
+            after_ref = name.isdigit()
+        elif name.isdigit() and int(name) <= 9:
+            out.append(f"\\{name}")
+            after_ref = False
+        else:
+            raise NotImplementedError(
+                f"{dialect} only supports capture group references $0 to $9, "
+                f"got ${name}"
+            )
+    text = literal(replacement[pos:])
+    if after_ref and text[:1].isdigit():
+        text = "\\" + text
+    out.append(text)
+    return "".join(out)

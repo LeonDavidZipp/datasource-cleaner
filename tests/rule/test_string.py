@@ -1,4 +1,5 @@
 import dataclasses
+import sqlite3
 import sys
 from collections.abc import Callable, Sequence
 
@@ -8,7 +9,7 @@ import regex
 from hypothesis import given
 from hypothesis import strategies as st
 
-from datasource_cleaner.rule import StringRule
+from datasource_cleaner.rule import Dialect, StringRule
 from datasource_cleaner.rule._string import Case
 
 # -------------------------------------- helpers ---------------------------------------
@@ -537,3 +538,188 @@ def test_apply_chains_steps_in_documented_order(
 ):
     expected = _apply_string(values, lambda exp: _chain_in_documented_order(rule, exp))
     assert _apply_string(values, rule.apply) == expected
+
+
+# --------------------------------------- to_sql ---------------------------------------
+
+
+def _run_sqlite(sql: str, values: list[str | None]) -> list[str | None]:
+    with sqlite3.connect(":memory:") as con:
+        con.execute("CREATE TABLE t (i INTEGER, col TEXT)")
+        con.executemany("INSERT INTO t VALUES (?, ?)", enumerate(values))
+        query = f"SELECT {sql.format(col='col')} FROM t ORDER BY i"
+        return [row[0] for row in con.execute(query)]
+
+
+# sqlite's LENGTH stops at NUL, and its LOWER and UPPER only convert ASCII
+sqlite_text = st.text(alphabet=st.characters(codec="utf-8", exclude_characters="\0"))
+ascii_text = st.text(alphabet=st.characters(codec="ascii", exclude_characters="\0"))
+sqlite_trim_chars = trim_chars.filter(lambda chars: "\0" not in chars)
+
+sqlite_rules = st.builds(
+    StringRule,
+    trim_left=st.one_of(st.booleans(), sqlite_trim_chars),
+    trim_right=st.one_of(st.booleans(), sqlite_trim_chars),
+    null_values=st.lists(sqlite_text, unique=True),
+    null_values_ignore_case=st.just(False),
+    # pairs are applied one after another in sql, so a single pair is exact
+    replace=st.lists(st.tuples(sqlite_text.filter(bool), sqlite_text), max_size=1),
+    max_length=st.one_of(st.none(), widths),
+    pad_char=st.characters(codec="utf-8", exclude_characters="\0"),
+    empty_as_null=st.booleans(),
+).flatmap(
+    lambda rule: st.one_of(
+        st.just(rule),
+        widths.map(lambda w: dataclasses.replace(rule, pad_left=w)),
+        widths.map(lambda w: dataclasses.replace(rule, pad_right=w)),
+    )
+)
+
+
+@given(rule=sqlite_rules, values=st.lists(st.one_of(st.none(), sqlite_text)))
+def test_to_sql_sqlite_matches_apply(rule: StringRule, values: list[str | None]):
+    assert _run_sqlite(rule.to_sql("sqlite"), values) == _apply_string(
+        values, rule.apply
+    )
+
+
+@pytest.mark.parametrize("case", ["lower", "upper"])
+@given(
+    null_values=st.lists(ascii_text),
+    values=st.lists(st.one_of(st.none(), ascii_text)),
+)
+def test_to_sql_sqlite_case_matches_apply(
+    case: Case, null_values: list[str], values: list[str | None]
+):
+    rule = StringRule(case=case, null_values=null_values, null_values_ignore_case=True)
+    assert _run_sqlite(rule.to_sql("sqlite"), values) == _apply_string(
+        values, rule.apply
+    )
+
+
+@pytest.mark.parametrize("dialect", ["postgres", "bigquery", "mysql", "sqlite"])
+def test_to_sql_nothing_to_do(dialect: Dialect):
+    rule = StringRule(trim_left=False, trim_right=False)
+    assert rule.to_sql(dialect) == "{col}"
+
+
+@pytest.mark.parametrize(
+    ("rule", "dialect", "expected"),
+    [
+        (StringRule(trim_left=False, trim_right="x"), "postgres", "RTRIM({col}, 'x')"),
+        (
+            StringRule(trim_left="x", trim_right=False),
+            "mysql",
+            r"REGEXP_REPLACE({col}, '\\A[\\x{{78}}]+', '')",
+        ),
+        (
+            StringRule(trim_left=False, trim_right=False, null_values=["NA", "NA"]),
+            "postgres",
+            "CASE WHEN {col} IN ('NA') THEN NULL ELSE {col} END",
+        ),
+        (
+            StringRule(
+                trim_left=False,
+                trim_right=False,
+                null_values=["NA"],
+                null_values_ignore_case=True,
+            ),
+            "mysql",
+            "CASE WHEN CAST(LOWER({col}) AS BINARY) IN ('na') THEN NULL ELSE {col} END",
+        ),
+        (
+            StringRule(
+                trim_left=False, trim_right=False, replace=[("a", "b"), ("c", "d")]
+            ),
+            "sqlite",
+            "REPLACE(REPLACE({col}, 'a', 'b'), 'c', 'd')",
+        ),
+        (
+            StringRule(
+                trim_left=False, trim_right=False, regex_replace=[("(a)", "$1$$")]
+            ),
+            "postgres",
+            r"REGEXP_REPLACE({col}, '(a)', '\1$', 'g')",
+        ),
+        (
+            StringRule(
+                trim_left=False, trim_right=False, regex_replace=[("(a)", "${1}0")]
+            ),
+            "bigquery",
+            r"REGEXP_REPLACE({col}, '(a)', '\\10')",
+        ),
+        (
+            StringRule(
+                trim_left=False,
+                trim_right=False,
+                regex_replace=[("(?<n>a)", "${n}$1 0")],
+            ),
+            "mysql",
+            r"REGEXP_REPLACE({col}, '(?<n>a)', '${{n}}$1 0')",
+        ),
+        (
+            StringRule(
+                trim_left=False, trim_right=False, regex_replace=[("(a)", "${1}0")]
+            ),
+            "mysql",
+            r"REGEXP_REPLACE({col}, '(a)', '$1\\0')",
+        ),
+        (
+            StringRule(trim_left=False, trim_right=False, case="title"),
+            "bigquery",
+            "INITCAP({col})",
+        ),
+        (
+            StringRule(trim_left=False, trim_right=False, max_length=3),
+            "sqlite",
+            "SUBSTR({col}, 1, 3)",
+        ),
+        (
+            StringRule(trim_left=False, trim_right=False, pad_left=3, pad_char="0"),
+            "mysql",
+            "LPAD({col}, GREATEST(3, CHAR_LENGTH({col})), '0')",
+        ),
+        (
+            StringRule(trim_left=False, trim_right=False, empty_as_null=True),
+            "postgres",
+            "NULLIF({col}, '')",
+        ),
+        (
+            StringRule(trim_left=False, trim_right=False, empty_as_null=True),
+            "mysql",
+            "CASE WHEN CHAR_LENGTH({col}) = 0 THEN NULL ELSE {col} END",
+        ),
+    ],
+)
+def test_to_sql_examples(rule: StringRule, dialect: Dialect, expected: str):
+    assert rule.to_sql(dialect) == expected
+
+
+@pytest.mark.parametrize(
+    ("dialect", "value", "expected"),
+    [
+        ("postgres", "it's {a} \\", "'it''s {{a}} \\'"),
+        ("sqlite", "it's", "'it''s'"),
+        ("mysql", "it's \\", "'it''s \\\\'"),
+        ("bigquery", "it's \\\n", "'it\\'s \\\\\\U0000000a'"),
+    ],
+)
+def test_to_sql_literal_escaping(dialect: Dialect, value: str, expected: str):
+    rule = StringRule(trim_left=False, trim_right=False, replace=[("x", value)])
+    assert rule.to_sql(dialect) == f"REPLACE({{col}}, 'x', {expected})"
+
+
+@pytest.mark.parametrize(
+    ("rule", "dialect"),
+    [
+        (StringRule(collapse_whitespace=True), "sqlite"),
+        (StringRule(regex_replace=[("a", "b")]), "sqlite"),
+        (StringRule(case="title"), "sqlite"),
+        (StringRule(case="title"), "mysql"),
+        (StringRule(regex_replace=[("(?<n>a)", "${n}")]), "postgres"),
+        (StringRule(regex_replace=[("a", "$10")]), "bigquery"),
+    ],
+)
+def test_to_sql_unsupported_raises(rule: StringRule, dialect: Dialect):
+    with pytest.raises(NotImplementedError):
+        rule.to_sql(dialect)
